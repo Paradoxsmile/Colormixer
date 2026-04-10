@@ -1,8 +1,9 @@
 /**
  * Colormixer — Core Paint Mixing Algorithm
  *
- * Simulates subtractive paint mixing using a weighted geometric mean
- * in linear RGB space, optimized in CIELAB for perceptual accuracy.
+ * Simulates subtractive paint mixing using Kubelka-Munk theory
+ * (K/S absorption-scattering coefficients in linear RGB space),
+ * optimized in CIELAB with Nelder-Mead + random restarts.
  */
 
 const ColorMixer = (() => {
@@ -43,15 +44,38 @@ const ColorMixer = (() => {
     return '#' + [r, g, b].map(c => c.toString(16).padStart(2, '0')).join('');
   }
 
-  // ── Base paint palette ───────────────────────────────────────
+  // ── Kubelka-Munk K/S model ──────────────────────────────────
+  // K/S = (1 - R)^2 / (2R)  where R is reflectance per channel.
+  // Mix K/S linearly by weight, then invert back to reflectance.
+
+  function rgbToKS(linearRGB) {
+    return linearRGB.map(r => {
+      const R = Math.max(r, 0.001);
+      return (1 - R) ** 2 / (2 * R);
+    });
+  }
+
+  function ksToReflectance(ks) {
+    return ks.map(v => {
+      const R = 1 + v - Math.sqrt(v * v + 2 * v);
+      return Math.max(0, Math.min(1, R));
+    });
+  }
+
+  // ── Base paint palette (8 artist paints) ─────────────────────
 
   const BASE_PAINTS = [
-    { name: 'Red',    hex: '#CD1916' },
-    { name: 'Yellow', hex: '#FFD300' },
-    { name: 'Blue',   hex: '#1A3A8A' },
-    { name: 'White',  hex: '#F5F5F0' },
-    { name: 'Black',  hex: '#1C1C1C' },
+    { name: 'Cad Red',      hex: '#C8372D' },
+    { name: 'Cad Yellow',   hex: '#F5C518' },
+    { name: 'Ultramarine',  hex: '#2E3F9E' },
+    { name: 'Phthalo Blue', hex: '#1B6B93' },
+    { name: 'Quin Magenta', hex: '#8E2344' },
+    { name: 'Burnt Sienna', hex: '#8A4513' },
+    { name: 'White',        hex: '#F8F8F6' },
+    { name: 'Black',        hex: '#1A1A18' },
   ];
+
+  const NUM_PAINTS = BASE_PAINTS.length;
 
   let _init = false;
   function ensureInit() {
@@ -61,27 +85,25 @@ const ColorMixer = (() => {
       const rgb = chroma(p.hex).rgb();
       p.linear = [srgbToLinear(rgb[0]), srgbToLinear(rgb[1]), srgbToLinear(rgb[2])];
       p.lab = linearRgbToLab(p.linear);
+      p.ks = rgbToKS(p.linear);
     });
   }
 
-  // ── Subtractive mixing model ─────────────────────────────────
-  // Weighted geometric mean in linear RGB approximates subtractive
-  // pigment mixing: darker pigments dominate, mixing darkens.
+  // ── Subtractive mixing (Kubelka-Munk) ───────────────────────
 
-  const LOG_FLOOR = Math.log(0.0001);
+  function mixKS(ratios) {
+    const ks = [0, 0, 0];
+    for (let ch = 0; ch < 3; ch++) {
+      for (let i = 0; i < NUM_PAINTS; i++) {
+        if (ratios[i] <= 0) continue;
+        ks[ch] += ratios[i] * BASE_PAINTS[i].ks[ch];
+      }
+    }
+    return ks;
+  }
 
   function mixLinear(ratios) {
-    const result = [0, 0, 0];
-    for (let ch = 0; ch < 3; ch++) {
-      let logSum = 0;
-      for (let i = 0; i < 5; i++) {
-        if (ratios[i] <= 0) continue;
-        const v = BASE_PAINTS[i].linear[ch];
-        logSum += ratios[i] * (v > 0.0001 ? Math.log(v) : LOG_FLOOR);
-      }
-      result[ch] = Math.exp(logSum);
-    }
-    return result;
+    return ksToReflectance(mixKS(ratios));
   }
 
   function simulateMix(ratios) {
@@ -104,12 +126,20 @@ const ColorMixer = (() => {
   // ── Normalize ────────────────────────────────────────────────
 
   function normalize(ratios) {
-    const sum = ratios.reduce((s, v) => s + Math.max(0, v), 0);
-    if (sum === 0) return [0, 0, 0, 1, 0];
-    return ratios.map(v => Math.max(0, v) / sum);
+    const clamped = ratios.map(v => Math.max(0, v));
+    const sum = clamped.reduce((s, v) => s + v, 0);
+    if (sum === 0) {
+      const result = new Array(NUM_PAINTS).fill(0);
+      result[NUM_PAINTS - 2] = 1; // default to white
+      return result;
+    }
+    return clamped.map(v => v / sum);
   }
 
   // ── Heuristic initial guess ──────────────────────────────────
+  // Maps target LAB color to a reasonable starting paint mix.
+  // Indices: 0=CadRed, 1=CadYellow, 2=Ultramarine, 3=PhthaloBl,
+  //          4=QuinMag, 5=BurntSienna, 6=White, 7=Black
 
   function heuristicGuess(targetLab) {
     const L = targetLab[0];
@@ -118,132 +148,163 @@ const ColorMixer = (() => {
     const C = Math.sqrt(a * a + b * b);
     const hue = (Math.atan2(b, a) * 180 / Math.PI + 360) % 360;
 
-    const ratios = [0, 0, 0, 0, 0];
+    const ratios = new Array(NUM_PAINTS).fill(0);
 
     const whiteness = Math.max(0, (L - 50) / 50);
     const blackness = Math.max(0, (50 - L) / 50);
 
     if (C < 10) {
-      const wRatio = L / 100;
-      ratios[3] = wRatio;
-      ratios[4] = 1 - wRatio;
+      // Neutral / gray: white + black, with burnt sienna for warm bias
+      ratios[6] = L / 100;
+      ratios[7] = 1 - L / 100;
+      if (b > 2) ratios[5] = 0.1;
       return normalize(ratios);
     }
 
+    // Map hue angle to primary paint pairs
     let primary1, primary2, blend;
-    if (hue < 60) {
-      primary1 = 0; primary2 = 1;
-      blend = hue / 60;
-    } else if (hue < 180) {
-      primary1 = 1; primary2 = 2;
-      blend = (hue - 60) / 120;
+
+    if (hue < 30) {
+      primary1 = 0; primary2 = 4; // Cad Red ← Quin Magenta
+      blend = hue / 30;
+    } else if (hue < 70) {
+      primary1 = 0; primary2 = 1; // Cad Red → Cad Yellow
+      blend = (hue - 30) / 40;
+    } else if (hue < 150) {
+      primary1 = 1; primary2 = 3; // Cad Yellow → Phthalo Blue
+      blend = (hue - 70) / 80;
+    } else if (hue < 210) {
+      primary1 = 3; primary2 = 2; // Phthalo Blue → Ultramarine
+      blend = (hue - 150) / 60;
     } else if (hue < 270) {
-      primary1 = 2; primary2 = 0;
-      blend = (hue - 180) / 90;
+      primary1 = 2; primary2 = 4; // Ultramarine → Quin Magenta
+      blend = (hue - 210) / 60;
+    } else if (hue < 330) {
+      primary1 = 4; primary2 = 0; // Quin Magenta → Cad Red
+      blend = (hue - 270) / 60;
     } else {
-      primary1 = 0; primary2 = 2;
-      blend = 1 - (hue - 270) / 90;
+      primary1 = 0; primary2 = 4; // Cad Red ← Quin Magenta
+      blend = (360 - hue) / 30;
     }
 
     const cw = Math.min(C / 80, 1);
     ratios[primary1] = cw * (1 - blend);
     ratios[primary2] = cw * blend;
-    ratios[3] = whiteness * (1 - cw * 0.5);
-    ratios[4] = blackness * (1 - cw * 0.5);
+
+    // Brown / earth tones get burnt sienna boost
+    if (C < 50 && hue > 15 && hue < 65 && L < 55) {
+      ratios[5] = cw * 0.4;
+    }
+
+    ratios[6] = whiteness * (1 - cw * 0.5);
+    ratios[7] = blackness * (1 - cw * 0.5);
 
     return normalize(ratios);
   }
 
-  // ── Broad grid search ────────────────────────────────────────
+  // ── Nelder-Mead simplex optimizer ────────────────────────────
+  // Derivative-free optimization on the paint-ratio simplex.
 
-  function broadSearch(targetLab) {
-    let bestRatios = null;
-    let bestError = Infinity;
-    const G = 10; // 10% steps
+  function nelderMead(targetLab, startRatios, maxIter) {
+    maxIter = maxIter || 250;
+    const n = NUM_PAINTS;
 
-    // Scan all 1-, 2-, and 3-paint combinations
-    for (let i = 0; i < 5; i++) {
-      for (let j = i; j < 5; j++) {
-        for (let k = j; k < 5; k++) {
-          for (let a = 0; a <= G; a++) {
-            for (let b = 0; b <= G - a; b++) {
-              const c = G - a - b;
-              const ratios = [0, 0, 0, 0, 0];
-              ratios[i]  = a / G;
-              ratios[j] += b / G;
-              ratios[k] += c / G;
-              const normed = normalize(ratios);
-              const error = deltaE76(simulateMix(normed), targetLab);
-              if (error < bestError) {
-                bestError = error;
-                bestRatios = normed;
-              }
-            }
-          }
+    function objective(ratios) {
+      return deltaE76(simulateMix(normalize(ratios)), targetLab);
+    }
+
+    // Build initial simplex: start point + n perturbations
+    const simplex = [];
+    const start = normalize(startRatios);
+    simplex.push({ x: start, f: objective(start) });
+
+    for (let i = 0; i < n; i++) {
+      const point = [...start];
+      point[i] = Math.min(1, point[i] + 0.15);
+      const normed = normalize(point);
+      simplex.push({ x: normed, f: objective(normed) });
+    }
+
+    for (let iter = 0; iter < maxIter; iter++) {
+      // Sort: best first
+      simplex.sort((a, b) => a.f - b.f);
+
+      // Convergence checks
+      if (simplex[0].f < 0.3) break;
+      if (simplex[n].f - simplex[0].f < 0.0005) break;
+
+      // Centroid of all points except worst
+      const centroid = new Array(n).fill(0);
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          centroid[j] += simplex[i].x[j];
         }
+      }
+      for (let j = 0; j < n; j++) centroid[j] /= n;
+
+      const worst = simplex[n];
+
+      // Reflection (alpha = 1)
+      const reflected = normalize(centroid.map((c, j) => c + (c - worst.x[j])));
+      const rF = objective(reflected);
+
+      if (rF < simplex[n - 1].f && rF >= simplex[0].f) {
+        simplex[n] = { x: reflected, f: rF };
+        continue;
+      }
+
+      if (rF < simplex[0].f) {
+        // Expansion (gamma = 2)
+        const expanded = normalize(centroid.map((c, j) => c + 2 * (reflected[j] - c)));
+        const eF = objective(expanded);
+        simplex[n] = eF < rF ? { x: expanded, f: eF } : { x: reflected, f: rF };
+        continue;
+      }
+
+      // Contraction (rho = 0.5)
+      const contracted = normalize(centroid.map((c, j) => c + 0.5 * (worst.x[j] - c)));
+      const cF = objective(contracted);
+
+      if (cF < worst.f) {
+        simplex[n] = { x: contracted, f: cF };
+        continue;
+      }
+
+      // Shrink (sigma = 0.5)
+      const best = simplex[0];
+      for (let i = 1; i <= n; i++) {
+        const shrunk = normalize(best.x.map((bv, j) => bv + 0.5 * (simplex[i].x[j] - bv)));
+        simplex[i] = { x: shrunk, f: objective(shrunk) };
       }
     }
 
-    return bestRatios;
+    simplex.sort((a, b) => a.f - b.f);
+    return normalize(simplex[0].x);
   }
 
-  // ── Iterative refinement ─────────────────────────────────────
+  // ── Random starting points ───────────────────────────────────
 
-  function refineRatios(targetLab, initialRatios) {
-    let best = [...initialRatios];
-    let bestError = deltaE76(simulateMix(best), targetLab);
-
-    let step = 0.10;
-    let stagnant = 0;
-
-    for (let iter = 0; iter < 80; iter++) {
-      let improved = false;
-
-      // Pairwise transfers
-      for (let i = 0; i < 5; i++) {
-        for (let j = 0; j < 5; j++) {
-          if (i === j) continue;
-          const candidate = [...best];
-          const shift = Math.min(step, candidate[j]);
-          if (shift <= 0) continue;
-          candidate[i] += shift;
-          candidate[j] -= shift;
-          const normed = normalize(candidate);
-          const error = deltaE76(simulateMix(normed), targetLab);
-          if (error < bestError - 0.0001) {
-            best = normed;
-            bestError = error;
-            improved = true;
-          }
-        }
-      }
-
-      // Boost one paint at expense of all others
-      for (let i = 0; i < 5; i++) {
-        const candidate = [...best];
-        for (let j = 0; j < 5; j++) {
-          if (j !== i) candidate[j] *= (1 - step);
-        }
-        candidate[i] = Math.min(1, candidate[i] + step * (1 - candidate[i]));
-        const normed = normalize(candidate);
-        const error = deltaE76(simulateMix(normed), targetLab);
-        if (error < bestError - 0.0001) {
-          best = normed;
-          bestError = error;
-          improved = true;
-        }
-      }
-
-      if (!improved) {
-        stagnant++;
-        step *= 0.6;
-        if (step < 0.001 || stagnant > 5) break;
-      } else {
-        stagnant = 0;
-      }
+  function randomDirichlet(n) {
+    const vals = [];
+    for (let i = 0; i < n; i++) {
+      vals.push(-Math.log(Math.random() + 1e-10));
     }
+    const sum = vals.reduce((s, v) => s + v, 0);
+    return vals.map(v => v / sum);
+  }
 
-    return best;
+  function randomSparse(n) {
+    const ratios = new Array(n).fill(0);
+    const numActive = 1 + Math.floor(Math.random() * 3);
+    const indices = [];
+    while (indices.length < numActive) {
+      const idx = Math.floor(Math.random() * n);
+      if (!indices.includes(idx)) indices.push(idx);
+    }
+    for (const idx of indices) {
+      ratios[idx] = Math.random();
+    }
+    return normalize(ratios);
   }
 
   // ── Main entry ───────────────────────────────────────────────
@@ -252,22 +313,41 @@ const ColorMixer = (() => {
     ensureInit();
     const targetLab = chroma(targetHex).lab();
 
-    // Phase 1: Heuristic guess
-    const heuristic = heuristicGuess(targetLab);
+    const candidates = [];
 
-    // Phase 2: Broad grid search
-    const broad = broadSearch(targetLab);
+    // Candidate 1: Heuristic guess based on hue/lightness
+    candidates.push(heuristicGuess(targetLab));
 
-    // Phase 3: Refine both candidates, keep the better one
-    const refinedH = refineRatios(targetLab, heuristic);
-    const refinedB = refineRatios(targetLab, broad);
+    // Candidate 2: Nearest single paint
+    let bestSingle = 0, bestSingleErr = Infinity;
+    for (let i = 0; i < NUM_PAINTS; i++) {
+      const err = deltaE76(BASE_PAINTS[i].lab, targetLab);
+      if (err < bestSingleErr) { bestSingleErr = err; bestSingle = i; }
+    }
+    const singleStart = new Array(NUM_PAINTS).fill(0);
+    singleStart[bestSingle] = 1;
+    candidates.push(singleStart);
 
-    const errorH = deltaE76(simulateMix(refinedH), targetLab);
-    const errorB = deltaE76(simulateMix(refinedB), targetLab);
-    const refined = errorB < errorH ? refinedB : refinedH;
+    // Candidates 3+: Random restarts (Dirichlet spread + sparse 1-3 paint)
+    for (let i = 0; i < 20; i++) {
+      candidates.push(i < 10 ? randomDirichlet(NUM_PAINTS) : randomSparse(NUM_PAINTS));
+    }
+
+    // Run Nelder-Mead on each, keep the best
+    let bestRatios = null;
+    let bestError = Infinity;
+
+    for (const start of candidates) {
+      const refined = nelderMead(targetLab, start);
+      const error = deltaE76(simulateMix(refined), targetLab);
+      if (error < bestError) {
+        bestError = error;
+        bestRatios = refined;
+      }
+    }
 
     // Round to whole percentages
-    const rounded = roundRatios(refined);
+    const rounded = roundRatios(bestRatios);
 
     // Compute final mixed color
     const mixedHex = linearRgbToHex(mixLinear(rounded));
