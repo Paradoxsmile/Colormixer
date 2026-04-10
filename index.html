@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Colormixer — Paint Mixing Guide</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Colormixer</h1>
+      <p class="subtitle">Convert any digital color into real paint mixing instructions</p>
+    </header>
+
+    <section class="input-section">
+      <div class="input-row">
+        <div class="color-picker-wrap">
+          <input type="color" id="colorPicker" value="#4A90D9">
+          <label for="colorPicker">Pick a color</label>
+        </div>
+        <div class="hex-input-wrap">
+          <label for="hexInput">HEX</label>
+          <input type="text" id="hexInput" value="#4A90D9" maxlength="7" spellcheck="false">
+        </div>
+        <div class="rgb-inputs">
+          <div class="rgb-field">
+            <label for="rInput">R</label>
+            <input type="number" id="rInput" min="0" max="255" value="74">
+          </div>
+          <div class="rgb-field">
+            <label for="gInput">G</label>
+            <input type="number" id="gInput" min="0" max="255" value="144">
+          </div>
+          <div class="rgb-field">
+            <label for="bInput">B</label>
+            <input type="number" id="bInput" min="0" max="255" value="217">
+          </div>
+        </div>
+      </div>
+      <button id="mixBtn" type="button">Mix Colors</button>
+    </section>
+
+    <section id="results" class="results hidden">
+      <div class="swatches">
+        <div class="swatch-card">
+          <div class="swatch" id="targetSwatch"></div>
+          <span class="swatch-label">Target Color</span>
+          <span class="swatch-hex" id="targetHexLabel"></span>
+        </div>
+        <div class="swatch-arrow">&#x2192;</div>
+        <div class="swatch-card">
+          <div class="swatch" id="mixedSwatch"></div>
+          <span class="swatch-label">Mixed Approximation</span>
+          <span class="swatch-hex" id="mixedHexLabel"></span>
+        </div>
+      </div>
+      <div class="delta-e" id="deltaE"></div>
+
+      <h2>Paint Ratios</h2>
+      <div id="ratios" class="ratios"></div>
+
+      <h2>Step-by-Step Instructions</h2>
+      <ol id="instructions" class="instructions"></ol>
+    </section>
+
+    <footer>
+      <p>Colormixer — Open source paint mixing tool. Colors are approximate; results depend on actual pigments used.</p>
+    </footer>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chroma-js@3.1.2/dist/chroma.min.js"></script>
+  <script src="js/color-mixer.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
