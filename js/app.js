@@ -47,7 +47,7 @@
     const r = clamp(parseInt(rInput.value) || 0, 0, 255);
     const g = clamp(parseInt(gInput.value) || 0, 0, 255);
     const b = clamp(parseInt(bInput.value) || 0, 0, 255);
-    setFromHex(chroma(r, g, b).hex());
+    setFromHex(chroma.rgb(r, g, b).hex());
   }
 
   rInput.addEventListener('change', onRGBChange);

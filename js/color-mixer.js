@@ -176,7 +176,6 @@ const ColorMixer = (() => {
 
     // Generate candidate starting points
     const granularity = 5; // steps of 20%
-    const candidates = [];
 
     // Systematic scan of 2-paint and 3-paint combinations
     for (let i = 0; i < 5; i++) {
